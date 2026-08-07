@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import alpaca_trade_api as tradeapi
-import pandas_ta as ta
+import pandas_ta_classic as ta
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import coint
 from dotenv import load_dotenv
