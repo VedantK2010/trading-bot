@@ -2,15 +2,14 @@ import os
 import datetime
 import numpy as np
 import pandas as pd
-import yfinance as yf
 import alpaca_trade_api as tradeapi
+from alpaca_trade_api.rest import TimeFrame
 import pandas_ta_classic as ta
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import coint
 from dotenv import load_dotenv
 load_dotenv('keys.env')
 
-# --- 1. API Configuration ---
 API_KEY = os.environ.get("ALPACA_API_KEY")
 SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY")
 BASE_URL = 'https://paper-api.alpaca.markets'
@@ -22,6 +21,7 @@ if not API_KEY or not SECRET_KEY:
     )
 
 api = tradeapi.REST(API_KEY, SECRET_KEY, BASE_URL, api_version='v2')
+DATA_FEED = 'iex'
 
 # --- 2. Fund Capital Allocation Weights ---
 # Total equals 0.85 (leaving 15% in cash buffer)
@@ -34,7 +34,6 @@ ALLOCATION_WEIGHTS = {
 
 # --- 3. Dynamic Budget Calculator ---
 def get_strategy_budget(strategy_name):
-    """Fetches total account equity and calculates the dollar budget for a strategy."""
     account = api.get_account()
     total_equity = float(account.equity)
     weight = ALLOCATION_WEIGHTS.get(strategy_name, 0)
@@ -44,7 +43,6 @@ def get_strategy_budget(strategy_name):
 
 
 def get_current_qty(ticker):
-    """Returns current held quantity for a ticker, or 0 if no position exists."""
     try:
         position = api.get_position(ticker)
         return int(position.qty)
@@ -52,7 +50,45 @@ def get_current_qty(ticker):
         return 0
 
 
-# --- 4. Strategy Modules ---
+def fetch_daily_bars(tickers, lookback_days=400):
+    single = isinstance(tickers, str)
+    symbols = [tickers] if single else list(tickers)
+
+    end = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=16)
+    start = end - datetime.timedelta(days=lookback_days)
+
+    bars = api.get_bars(
+        symbols,
+        TimeFrame.Day,
+        start.strftime('%Y-%m-%dT%H:%M:%SZ'),
+        end.strftime('%Y-%m-%dT%H:%M:%SZ'),
+        feed=DATA_FEED,
+        adjustment='raw',
+    ).df
+
+    if bars.empty:
+        raise RuntimeError(f"Alpaca returned no bar data for {symbols}")
+
+    if single:
+        return bars[['open', 'high', 'low', 'close', 'volume']]
+
+    bars = bars.reset_index()
+    if 'symbol' not in bars.columns:
+        # Edge case: some client versions omit the symbol column for
+        # single-element lists. Safe to assume it's the only ticker requested.
+        bars['symbol'] = symbols[0]
+
+    close_wide = bars.pivot(index='timestamp', columns='symbol', values='close')
+    close_wide = close_wide.dropna(axis=1, how='any')
+
+    missing = set(symbols) - set(close_wide.columns)
+    if missing:
+        print(f"Warning: no complete data returned for {sorted(missing)}, excluding from this run.")
+
+    return close_wide
+
+
+# --- 5. Strategy Modules ---
 
 def run_moving_average_strategy():
     strategy_id = 'trend_following'
@@ -61,11 +97,9 @@ def run_moving_average_strategy():
 
     print(f"\n--- Running MA Strategy for {ma_ticker} ---")
     try:
-        data = yf.download(ma_ticker, period='1y', progress=False)
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
+        data = fetch_daily_bars(ma_ticker, lookback_days=400)
+        close = data['close']
 
-        close = data['Close'].squeeze()
         data['Fast_MA'] = close.rolling(window=45).mean()
         data['Slow_MA'] = close.rolling(window=90).mean()
         data['RSI'] = ta.rsi(close, length=14)
@@ -100,12 +134,7 @@ def run_pairs_trading_strategy():
 
     print("\n--- Running Pairs Trading Strategy Scanner ---")
     try:
-        data = yf.download(pairs_basket, period='1y', progress=False)
-        if isinstance(data.columns, pd.MultiIndex):
-            prices_df = data['Close']
-        else:
-            prices_df = data[['Close']].droplevel(0, axis=1)
-        prices_df = prices_df.dropna(axis=1)
+        prices_df = fetch_daily_bars(pairs_basket, lookback_days=400)
 
         # Scan for cointegrated pairs
         n = prices_df.shape[1]
@@ -194,14 +223,7 @@ def run_momentum_strategy():
 
     print("\n--- Running Cross Sectional Momentum Strategy ---")
     try:
-        raw_data = yf.download(basket, period='1y', progress=False)
-
-        if isinstance(raw_data.columns, pd.MultiIndex):
-            prices_df = raw_data['Close']
-        else:
-            prices_df = raw_data[['Close']]
-
-        prices_df = prices_df.dropna(axis=1)
+        prices_df = fetch_daily_bars(basket, lookback_days=400)
 
         if len(prices_df) < lookback_days:
             print("Error: Insufficient historical data to compute lookback returns.")
@@ -271,7 +293,7 @@ def run_momentum_strategy():
         print("Momentum Basket executed.\n")
 
 
-# --- 5. Master Pipeline ---
+# --- 6. Master Pipeline ---
 def master_trading_pipeline():
     print(f"\n==========================================")
     print(f"Multi-Strategy Fund Waking Up: {datetime.datetime.now()}")
@@ -284,6 +306,6 @@ def master_trading_pipeline():
     print("Master Pipeline Complete. Going back to sleep.\n")
 
 
-# --- 6. Scheduler Setup ---
+# --- 7. Scheduler Setup ---
 if __name__ == "__main__":
     master_trading_pipeline()
