@@ -2,10 +2,10 @@ name: Daily Trading Pipeline
 
 on:
   # Have to flip this line twice a year:
-  #   EDT (roughly mid-Mar to early Nov): "35 20 * * 1-5"  
-  #   EST (roughly early Nov to mid-Mar): "35 21 * * 1-5"
+  #   EDT (roughly mid-Mar to early Nov): "0 14 * * 1-5" (10:00 AM EDT)
+  #   EST (roughly early Nov to mid-Mar): "0 15 * * 1-5" (10:00 AM EST)
   schedule:
-    - cron: "35 20 * * 1-5"
+    - cron: "0 14 * * 1-5"
   workflow_dispatch:
 
 jobs:

@@ -8,6 +8,7 @@ import pandas_ta_classic as ta
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import coint
 from dotenv import load_dotenv
+
 load_dotenv('keys.env')
 
 API_KEY = os.environ.get("ALPACA_API_KEY")
@@ -15,24 +16,17 @@ SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY")
 BASE_URL = 'https://paper-api.alpaca.markets'
 
 if not API_KEY or not SECRET_KEY:
-    raise RuntimeError(
-        "Missing ALPACA_API_KEY / ALPACA_SECRET_KEY environment variables. "
-        "Set them before running this script."
-    )
+    raise RuntimeError("Missing ALPACA_API_KEY / ALPACA_SECRET_KEY")
 
 api = tradeapi.REST(API_KEY, SECRET_KEY, BASE_URL, api_version='v2')
 DATA_FEED = 'iex'
 
-# --- 2. Fund Capital Allocation Weights ---
-# Total equals 0.85 (leaving 15% in cash buffer)
 ALLOCATION_WEIGHTS = {
     'trend_following': 0.30,
     'pairs_trading': 0.25,
     'momentum_basket': 0.30
 }
 
-
-# --- 3. Dynamic Budget Calculator ---
 def get_strategy_budget(strategy_name):
     account = api.get_account()
     total_equity = float(account.equity)
@@ -40,14 +34,6 @@ def get_strategy_budget(strategy_name):
     budget = total_equity * weight
     print(f"[{strategy_name.upper()}] Allocated Budget: ${budget:,.2f} ({weight*100}%)")
     return budget
-
-
-def get_current_qty(ticker):
-    try:
-        position = api.get_position(ticker)
-        return int(position.qty)
-    except Exception:
-        return 0
 
 
 def fetch_daily_bars(tickers, lookback_days=400):
@@ -74,88 +60,87 @@ def fetch_daily_bars(tickers, lookback_days=400):
 
     bars = bars.reset_index()
     if 'symbol' not in bars.columns:
-        # Edge case: some client versions omit the symbol column for
-        # single-element lists. Safe to assume it's the only ticker requested.
         bars['symbol'] = symbols[0]
 
     close_wide = bars.pivot(index='timestamp', columns='symbol', values='close')
     close_wide = close_wide.dropna(axis=1, how='any')
 
-    missing = set(symbols) - set(close_wide.columns)
-    if missing:
-        print(f"Warning: no complete data returned for {sorted(missing)}, excluding from this run.")
-
     return close_wide
 
 
-# --- 5. Strategy Modules ---
-
+# --- 1. Trend Following Strategy ---
 def run_moving_average_strategy():
     strategy_id = 'trend_following'
     budget = get_strategy_budget(strategy_id)
-    ma_ticker = 'AAPL'
-
-    print(f"\n--- Running MA Strategy for {ma_ticker} ---")
+    
+    etf_basket = ['SPY', 'QQQ', 'GLD', 'TLT']
+    target_portfolio = {ticker: 0.0 for ticker in etf_basket}
+    
+    print(f"\n--- Running MA Strategy for Macro ETFs ---")
     try:
-        data = fetch_daily_bars(ma_ticker, lookback_days=400)
-        close = data['close']
+        data = fetch_daily_bars(etf_basket, lookback_days=400)
+        per_etf_budget = budget / len(etf_basket)
+        
+        for ticker in etf_basket:
+            if ticker not in data.columns: 
+                continue
+            close = data[ticker]
+            
+            fast_ma = close.rolling(window=45).mean()
+            slow_ma = close.rolling(window=90).mean()
+            rsi = ta.rsi(close, length=14)
+            
+            raw_signal = np.where((fast_ma > slow_ma) & (rsi < 70), 1, 0)
+            current_signal = raw_signal[-1]
+            print(f"MA Signal for {ticker}: {current_signal} (1=Buy, 0=Sell)")
+            
+            if current_signal == 1:
+                latest_price = close.iloc[-1]
+                target_portfolio[ticker] = round(per_etf_budget / latest_price, 4)
 
-        data['Fast_MA'] = close.rolling(window=45).mean()
-        data['Slow_MA'] = close.rolling(window=90).mean()
-        data['RSI'] = ta.rsi(close, length=14)
-
-        data['Raw_Signal'] = np.where((data['Fast_MA'] > data['Slow_MA']) & (data['RSI'] < 70), 1, 0)
-        current_signal = data['Raw_Signal'].iloc[-1]
-        print(f"MA Signal for {ma_ticker}: {current_signal} (1=Buy, 0=Sell)")
-
-        current_qty = get_current_qty(ma_ticker)
-        latest_price = close.iloc[-1]
-
-        # Size the position from the strategy's dollar budget rather than a fixed qty
-        target_qty = int(budget // latest_price) if current_signal == 1 else 0
-
-        if current_signal == 1 and current_qty == 0 and target_qty > 0:
-            api.submit_order(symbol=ma_ticker, qty=target_qty, side='buy', type='market', time_in_force='gtc')
-            print(f"MA Bot: BUY order submitted for {target_qty} shares of {ma_ticker}.")
-        elif current_signal == 0 and current_qty > 0:
-            api.submit_order(symbol=ma_ticker, qty=current_qty, side='sell', type='market', time_in_force='gtc')
-            print(f"MA Bot: SELL order submitted. Closed position for {ma_ticker}.")
-        else:
-            print("MA Bot: Position matches signal. Holding.")
     except Exception as e:
         print(f"Error in MA Strategy: {e}")
-    print("Trend Following executed.\n")
+        
+    print(f"Trend Following Target: {target_portfolio}")
+    return target_portfolio
 
 
+# --- 2. Pairs Trading Strategy ---
 def run_pairs_trading_strategy():
     strategy_id = 'pairs_trading'
     budget = get_strategy_budget(strategy_id)
-    pairs_basket = ['AAPL', 'MSFT', 'GOOGL', 'META', 'PEP', 'KO', 'V', 'MA']
-
-    print("\n--- Running Pairs Trading Strategy Scanner ---")
+    
+    SECTORS = {
+        'Semiconductors': ['NVDA', 'AMD', 'INTC', 'TSM', 'QCOM', 'AVGO', 'TXN'],
+        'Big_Tech': ['AAPL', 'MSFT', 'GOOGL', 'META', 'AMZN', 'NFLX'],
+        'Financials': ['JPM', 'BAC', 'WFC', 'C', 'GS', 'MS', 'V', 'MA']
+    }
+    
+    all_tickers = [ticker for sector in SECTORS.values() for ticker in sector]
+    target_portfolio = {ticker: 0.0 for ticker in all_tickers}
+    
+    print("\n--- Running Sector-Clustered Pairs Scanner ---")
     try:
-        prices_df = fetch_daily_bars(pairs_basket, lookback_days=400)
-
-        # Scan for cointegrated pairs
-        n = prices_df.shape[1]
-        keys = prices_df.columns
+        prices_df = fetch_daily_bars(all_tickers, lookback_days=400)
+        
         valid_pairs = []
-        for i in range(n):
-            for j in range(i + 1, n):
-                result = coint(prices_df[keys[i]], prices_df[keys[j]])
-                if result[1] < 0.05:
-                    valid_pairs.append((keys[i], keys[j], result[1]))
+        for sector_name, tickers in SECTORS.items():
+            valid_tickers = [t for t in tickers if t in prices_df.columns]
+            n = len(valid_tickers)
+            for i in range(n):
+                for j in range(i + 1, n):
+                    result = coint(prices_df[valid_tickers[i]], prices_df[valid_tickers[j]])
+                    if result[1] < 0.05:
+                        valid_pairs.append((valid_tickers[i], valid_tickers[j], result[1], sector_name))
 
         if not valid_pairs:
             print("Pairs Bot: No cointegrated pairs found today.")
-            return
+            return target_portfolio
 
-        # Take the most cointegrated pair (lowest p-value)
         valid_pairs.sort(key=lambda x: x[2])
-        stock1, stock2, pval = valid_pairs[0]
-        print(f"Pairs Bot: Selected top pair -> {stock2} vs {stock1} (p-value: {pval:.4f})")
+        stock1, stock2, pval, sector = valid_pairs[0]
+        print(f"Pairs Bot: Selected top pair in {sector} -> {stock2} vs {stock1} (p-value: {pval:.4f})")
 
-        # Calculate hedge ratio & z-score
         X = sm.add_constant(prices_df[stock1])
         model = sm.OLS(prices_df[stock2], X).fit()
         beta = model.params[stock1]
@@ -168,144 +153,155 @@ def run_pairs_trading_strategy():
         price1 = prices_df[stock1].iloc[-1]
         price2 = prices_df[stock2].iloc[-1]
 
-        # Split the budget between the two legs, weighted by the hedge ratio
-        leg2_dollars = budget / (1 + beta)
-        leg1_dollars = budget - leg2_dollars
-        qty1 = int(leg1_dollars // price1)
-        qty2 = int(leg2_dollars // price2)
+        qty2 = round(budget / (price2 + abs(beta) * price1), 4)
+        qty1 = round(abs(beta) * qty2, 4)
 
-        held1 = get_current_qty(stock1)
-        held2 = get_current_qty(stock2)
-
-        if latest_z > 1.5 and latest_z < 3.0:
+        if 1.5 < latest_z < 3.0:
             print(f"Pairs Bot: Z-score high. Shorting spread (Short {stock2}, Long {stock1}).")
-            if held2 == 0 and held1 == 0 and qty1 > 0 and qty2 > 0:
-                api.submit_order(symbol=stock1, qty=qty1, side='buy', type='market', time_in_force='gtc')
-                api.submit_order(symbol=stock2, qty=qty2, side='sell', type='market', time_in_force='gtc')
-                print(f"Pairs Bot: Entered spread short — BUY {qty1} {stock1}, SELL {qty2} {stock2}.")
-            else:
-                print("Pairs Bot: Position already open or size too small; no new entry.")
-
-        elif latest_z < -1.5 and latest_z > -3.0:
+            target_portfolio[stock1] = qty1
+            target_portfolio[stock2] = -qty2
+        elif -3.0 < latest_z < -1.5:
             print(f"Pairs Bot: Z-score low. Longing spread (Long {stock2}, Short {stock1}).")
-            if held2 == 0 and held1 == 0 and qty1 > 0 and qty2 > 0:
-                api.submit_order(symbol=stock2, qty=qty2, side='buy', type='market', time_in_force='gtc')
-                api.submit_order(symbol=stock1, qty=qty1, side='sell', type='market', time_in_force='gtc')
-                print(f"Pairs Bot: Entered spread long — BUY {qty2} {stock2}, SELL {qty1} {stock1}.")
-            else:
-                print("Pairs Bot: Position already open or size too small; no new entry.")
-
-        elif abs(latest_z) >= 3.0:
-            print("Pairs Bot: Stop-loss threshold hit! Flattening pair positions.")
-            if held1 != 0:
-                side = 'sell' if held1 > 0 else 'buy'
-                api.submit_order(symbol=stock1, qty=abs(held1), side=side, type='market', time_in_force='gtc')
-            if held2 != 0:
-                side = 'sell' if held2 > 0 else 'buy'
-                api.submit_order(symbol=stock2, qty=abs(held2), side=side, type='market', time_in_force='gtc')
-            print("Pairs Bot: Flattened both legs.")
-
+            target_portfolio[stock2] = qty2
+            target_portfolio[stock1] = -qty1
         else:
-            print("Pairs Bot: Z-score inside neutral band. No action required.")
+            print("Pairs Bot: Z-score in neutral band or stop-loss. Target is 0.")
 
     except Exception as e:
         print(f"Error in Pairs Strategy: {e}")
-    print("Pairs Trading executed.\n")
+        
+    print(f"Pairs Trading Target: {target_portfolio}")
+    return target_portfolio
 
 
+# --- 3. Momentum Strategy ---
 def run_momentum_strategy():
     strategy_id = 'momentum_basket'
     budget = get_strategy_budget(strategy_id)
-    basket = ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'AMZN', 'TSLA', 'AMD', 'INTC', 'QCOM']
-
-    lookback_days = 63   # ~3 trading months
-    top_n = 3            # how many names to hold at once
-
-    print("\n--- Running Cross Sectional Momentum Strategy ---")
+    
+    print("\n--- Running Dynamic Cross Sectional Momentum ---")
     try:
+        print("Fetching Nasdaq-100 Universe...")
+        tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100", match="Ticker")
+        
+        if len(tables) > 0:
+            nasdaq_df = tables[0]
+            basket = nasdaq_df['Ticker'].tolist()
+            print(f"Successfully scraped {len(basket)} tickers.")
+        else:
+            print("Failed to scrape Wikipedia. Using fallback basket.")
+            basket = ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'AMZN', 'TSLA', 'AMD', 'INTC', 'QCOM', 'ADBE', 'NFLX', 'CSCO', 'PEP', 'AVGO']
+            
+        target_portfolio = {ticker: 0.0 for ticker in basket}
+        lookback_days = 63
+        top_n = 5
+
         prices_df = fetch_daily_bars(basket, lookback_days=400)
 
         if len(prices_df) < lookback_days:
-            print("Error: Insufficient historical data to compute lookback returns.")
-            return None
+            print("Error: Insufficient historical data.")
+            return target_portfolio
 
-        # Rank by lookback return
         momentum_returns = (prices_df.iloc[-1] - prices_df.iloc[-lookback_days]) / prices_df.iloc[-lookback_days]
         ranked_momentum = momentum_returns.sort_values(ascending=False)
-
-        results = []
+        
         target_tickers = []
         for rank, (ticker, ret) in enumerate(ranked_momentum.items(), start=1):
-            signal = "TARGET (LONG)" if rank <= top_n else "IGNORE (LAGGARD)"
             if rank <= top_n:
                 target_tickers.append(ticker)
-            results.append({
-                'Rank': rank,
-                'Ticker': ticker,
-                f'{lookback_days}D Return (%)': round(ret * 100, 2),
-                'Action': signal
-            })
 
-        results_df = pd.DataFrame(results)
-        print(f"\nLookback Window: {lookback_days} Trading Days")
-        print(f"Targeting Top {top_n} Strongest Assets\n")
-        print(results_df.to_string(index=False))
-
-        # Execution: equal-dollar allocation across the top_n names
         per_stock_budget = budget / top_n if top_n > 0 else 0
         latest_prices = prices_df.iloc[-1]
 
-        try:
-            current_positions = {p.symbol: int(p.qty) for p in api.list_positions()}
-        except Exception as e:
-            print(f"Could not fetch positions: {e}")
-            current_positions = {}
-
-        # Exit names that fell out of the top_n
-        for ticker in basket:
-            if ticker not in target_tickers and current_positions.get(ticker, 0) > 0:
-                qty = current_positions[ticker]
-                api.submit_order(symbol=ticker, qty=qty, side='sell', type='market', time_in_force='gtc')
-                print(f"Momentum Bot: SELL {qty} {ticker} (dropped out of top {top_n}).")
-
-        # Buy / trim toward target size for the current top_n
         for ticker in target_tickers:
             price = latest_prices[ticker]
-            target_qty = int(per_stock_budget // price)
-            held_qty = current_positions.get(ticker, 0)
-            delta = target_qty - held_qty
-
-            if delta > 0:
-                api.submit_order(symbol=ticker, qty=delta, side='buy', type='market', time_in_force='gtc')
-                print(f"Momentum Bot: BUY {delta} {ticker} (target {target_qty}, held {held_qty}).")
-            elif delta < 0:
-                api.submit_order(symbol=ticker, qty=abs(delta), side='sell', type='market', time_in_force='gtc')
-                print(f"Momentum Bot: TRIM {abs(delta)} {ticker} (target {target_qty}, held {held_qty}).")
-            else:
-                print(f"Momentum Bot: {ticker} already at target size ({held_qty}).")
-
-        return results_df
+            target_portfolio[ticker] = round(per_stock_budget / price, 4)
 
     except Exception as e:
         print(f"Error in Momentum Strategy: {e}")
-        return None
-    finally:
-        print("Momentum Basket executed.\n")
+        target_portfolio = {}
+        
+    print(f"Momentum Target: {target_portfolio}")
+    return target_portfolio
 
 
-# --- 6. Master Pipeline ---
+def get_actual_positions():
+    try:
+        positions = api.list_positions()
+        actuals = {}
+        for p in positions:
+            qty = float(p.qty)
+            if getattr(p, 'side', '') == 'short':
+                qty = -abs(qty)
+            actuals[p.symbol] = qty
+        return actuals
+    except Exception as e:
+        print(f"Could not fetch positions: {e}")
+        return {}
+
+
+def execute_target_portfolio(target_portfolio):
+    print("\n--- Execution Engine ---")
+    
+    try:
+        api.cancel_all_orders()
+        print("Cancelled all pending open orders to clean the slate.")
+    except Exception as e:
+        print(f"Failed to cancel open orders: {e}")
+
+    actual_positions = get_actual_positions()
+    
+    all_symbols = set(target_portfolio.keys()).union(set(actual_positions.keys()))
+    
+    for symbol in all_symbols:
+        target_qty = round(target_portfolio.get(symbol, 0.0), 4)
+        actual_qty = round(actual_positions.get(symbol, 0.0), 4)
+        delta = round(target_qty - actual_qty, 4)
+        
+        if abs(delta) < 0.0001:
+            continue
+            
+        print(f"Rebalancing {symbol}: Actual={actual_qty}, Target={target_qty}, Delta={delta}")
+        
+        try:
+            side = 'buy' if delta > 0 else 'sell'
+            api.submit_order(
+                symbol=symbol,
+                qty=abs(delta),
+                side=side,
+                type='market',
+                time_in_force='day'
+            )
+            print(f"-> Submitted {side.upper()} order for {abs(delta)} shares of {symbol}")
+        except Exception as e:
+            print(f"-> Error placing order for {symbol}: {e}")
+
+
 def master_trading_pipeline():
     print(f"\n==========================================")
     print(f"Multi-Strategy Fund Waking Up: {datetime.datetime.now()}")
     print(f"==========================================")
 
-    run_moving_average_strategy()
-    run_pairs_trading_strategy()
-    run_momentum_strategy()
+    ma_targets = run_moving_average_strategy()
+    pairs_targets = run_pairs_trading_strategy()
+    mom_targets = run_momentum_strategy()
 
-    print("Master Pipeline Complete. Going back to sleep.\n")
+    aggregated_targets = {}
+    all_targets = [ma_targets, pairs_targets, mom_targets]
+    
+    for strategy_portfolio in all_targets:
+        for ticker, qty in strategy_portfolio.items():
+            aggregated_targets[ticker] = aggregated_targets.get(ticker, 0.0) + qty
+            
+    print("\n--- Final Aggregated Target Portfolio ---")
+    for ticker, qty in aggregated_targets.items():
+        if abs(qty) > 0.0001:
+            print(f"{ticker}: {qty:.4f}")
+
+    execute_target_portfolio(aggregated_targets)
+
+    print("\nMaster Pipeline Complete. Going back to sleep.\n")
 
 
-# --- 7. Scheduler Setup ---
 if __name__ == "__main__":
     master_trading_pipeline()
