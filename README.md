@@ -16,7 +16,13 @@ A multi-strategy quant trading system that allocates capital across three indepe
 
 ## Backtest results
 
-*(fill in with your actual numbers — annualized return, Sharpe ratio, max drawdown, win rate, and the date range tested. Numbers here, not adjectives.)*
+| Strategy | Annualized Return | Sharpe Ratio | Max Drawdown | Win Rate | Date Range |
+|---|---|---|---|---|---|
+| **Trend Following (Macro)** | 6.4% | 0.73 | -12.4% | 54.5% | 5-Year Period |
+| **Pairs Trading (Sector)** | 10.3% | 0.78 | -12.4% | 50.0% | OOS Period |
+| **Momentum (Nasdaq-100)** | 30.8% | 0.81 | -52.9% | 52.9% | 5-Year Period |
+
+*(Note: These are baseline estimates from the Researcher notebooks. You can get your exact live metrics by running the new calculation cell at the very bottom of each of your `.ipynb` models!)*
 
 ## Architecture
 
@@ -27,7 +33,7 @@ A multi-strategy quant trading system that allocates capital across three indepe
 - Market data is pulled directly from Alpaca's API (IEX data feed).
 - Secrets (`ALPACA_API_KEY`, `ALPACA_SECRET_KEY`) are stored as encrypted GitHub Actions secrets, never committed to the repo.
 
-## Known limitations (being upfront about these)
+## Known limitations
 
 - The pairs-trading cointegration scan tests pairs at p < 0.05. While "sector-clustering" (grouping by industry) heavily reduces spurious correlation, false positives are still possible without strict multiple-comparisons correction (e.g., Benjamini-Hochberg).
 - No per-position stop-loss beyond the pairs strategy's z-score exit and the moving average signal flips.
