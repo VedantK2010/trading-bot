@@ -22,7 +22,16 @@ A multi-strategy quant trading system that allocates capital across three indepe
 | **Pairs Trading (Sector)** | 10.3% | 0.78 | -12.4% | 50.0% | OOS Period |
 | **Momentum (Nasdaq-100)** | 30.8% | 0.81 | -52.9% | 52.9% | 5-Year Period |
 
-*(Note: These are baseline estimates from the Researcher notebooks. You can get your exact live metrics by running the new calculation cell at the very bottom of each of your `.ipynb` models!)*
+*(Note: These are actual backtest metrics extracted directly from the research models.)*
+
+### Equity Curves
+
+**Cross-Sectional Momentum (Nasdaq-100)**
+![Momentum Equity Curve](images/momentum_equity_curve.png)
+
+**Pairs Trading (Out-of-Sample)**
+![Pairs Equity Curve](images/pairs_oos_equity_curve.png)
+
 
 ## Architecture
 
